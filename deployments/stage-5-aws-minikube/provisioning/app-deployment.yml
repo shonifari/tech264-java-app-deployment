@@ -1,0 +1,209 @@
+---
+# db-persistent-volume-claim.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: app-db-pvc
+  labels:
+    type: local
+spec:
+  volumeName: app-db-pv
+  storageClassName: manual
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Mi
+
+---
+# db-persistent-volume.yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: app-db-pv
+  labels:
+    type: local
+spec:
+  claimRef:
+    namespace: default
+    name: app-db-pvc
+  storageClassName: manual
+  capacity:
+    storage: 100Mi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: /var/lib/mysql
+
+
+---
+# DB DEPLOYMENT
+apiVersion: apps/v1  # specify api to use for deployment
+kind : Deployment  # kind of service/object you want to create
+metadata:
+  name: db-deployment 
+spec:
+  selector:
+    matchLabels:
+      app: java-app-db # look for this labe/tag to match the k8n service
+
+  # Creaate a ReplicaSet with instances/pods
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: java-app-db
+    spec:
+      containers:
+      - name: java-app-db
+        image: mysql
+        env:
+          - name: MYSQL_ROOT_PASSWORD
+            value: password
+          - name: MYSQL_DATABASE
+            value: library
+        ports:
+        - containerPort: 3306
+        volumeMounts:
+          - name: db-storage
+            mountPath: /var/lib/mysql
+          - name: init-script
+            mountPath: /docker-entrypoint-initdb.d/library.sql
+            subPath: library.sql
+
+      volumes:
+      - name: db-storage
+        persistentVolumeClaim:
+          claimName: app-db-pvc
+      - name: init-script
+        configMap:
+          name: library-sql-configmap
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: java-app-db-svc
+  namespace: default
+spec:
+  ports:
+  - protocol: TCP
+    port: 3306
+    targetPort: 3306
+  selector:
+    app: java-app-db  # Label to match service to deployment
+  type: ClusterIP
+
+---
+# SPARTA APP DEPLOYMENT
+apiVersion: apps/v1  # specify api to use for deployment
+kind : Deployment  # kind of service/object you want to create
+metadata:
+  name: app-deployment 
+spec:
+  selector:
+    matchLabels:
+      app: java-app # look for this labe/tag to match the k8n service
+
+  # Creaate a ReplicaSet with instances/pods
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: java-app
+    spec:
+      initContainers:
+      - name: wait-for-db
+        image: busybox
+        command:
+          - sh
+          - -c
+          - >
+            until nc -z java-app-db-svc 3306; do
+              echo "Waiting for database...";
+              sleep 5;
+            done;
+      containers:
+      - name: java-app
+        image:  shonifari8/java-app:v1
+        ports:
+        - containerPort: 5000
+        env:
+          - name: DB_HOST
+            value: jdbc:mysql://java-app-db-svc:3306/library
+          - name: DB_USER
+            value: root
+          - name: DB_PASS
+            value: password
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"   # Optional CPU limit
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: java-app-svc
+  namespace: default
+spec:
+  ports:
+  - nodePort: 30001
+    port: 5000
+    targetPort: 5000
+  selector:
+    app: java-app  # Label to match service to deployment
+  type: NodePort
+
+---
+# apiVersion: autoscaling/v2
+# kind: HorizontalPodAutoscaler
+# metadata:
+#   name: app-hpa
+# spec:
+#   scaleTargetRef:
+#     apiVersion: apps/v1
+#     kind: Deployment
+#     name: app-deployment
+#   minReplicas: 2
+#   maxReplicas: 3
+#   metrics:
+#   - type: Resource
+#     resource:
+#       name: cpu
+#       target:
+#         type: Utilization
+#         averageUtilization: 75
+
+
+---
+# ConfigMap for Initial SQL Script
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: library-sql-configmap
+data:
+  library.sql: |
+    DROP DATABASE IF EXISTS library;
+    CREATE DATABASE library;
+    USE library;
+
+    CREATE TABLE authors (
+    author_id int PRIMARY KEY NOT NULL AUTO_INCREMENT,
+    full_name VARCHAR(40)
+    );
+    CREATE TABLE books (
+    book_id int  PRIMARY KEY NOT NULL AUTO_INCREMENT,
+    title VARCHAR(100),
+    author_id int,
+    FOREIGN KEY (author_id) REFERENCES authors(author_id)
+    );
+
+    INSERT INTO library.authors (full_name) VALUES ('Phil');
+    INSERT INTO library.authors (full_name) VALUES ('William Shakespeare');
+    INSERT INTO library.authors (full_name) VALUES ('Jane Austen');
+    INSERT INTO library.authors (full_name) VALUES ('Charlees Dickeens');
